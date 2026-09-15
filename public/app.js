@@ -9,7 +9,6 @@
   "use strict";
 
   const QUESTION_SECONDS = 3 * 60;
-  const FINALS_PREP_SECONDS = 2 * 60;
   const FINALS_SECONDS = 45;
   const MAX_SKIPS = 3;
 
@@ -94,8 +93,51 @@
   let wheelAngle = 0;
   let wheelSpinning = false;
   let lastSpinToken = -1;
+  let wheelRaf = 0;
   let myLocalQuestions = [];
   let toastTimer = null;
+
+  const SPIN_MS = 5200;
+
+  function shuffleInPlace(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const tmp = arr[i];
+      arr[i] = arr[j];
+      arr[j] = tmp;
+    }
+    return arr;
+  }
+
+  /** Stable order so every client draws the same wheel segments */
+  function wheelPlayers(st = state) {
+    return activePlayers(st).slice().sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /** Deterministic 0..1 from spin token (+ salt) so all browsers match */
+  function spinUnit(token, salt = 0) {
+    let x = (Math.imul(token + 1, 2654435761) ^ Math.imul(salt + 1, 1597334677)) >>> 0;
+    x ^= x >>> 16;
+    x = Math.imul(x, 2246822519) >>> 0;
+    x ^= x >>> 13;
+    x = Math.imul(x, 3266489917) >>> 0;
+    x ^= x >>> 16;
+    return (x >>> 0) / 4294967296;
+  }
+
+  function easeOutQuint(t) {
+    return 1 - Math.pow(1 - t, 5);
+  }
+
+  /** Segment currently under the top pointer */
+  function indexUnderPointer(players, angleRad) {
+    const n = Math.max(players.length, 1);
+    const arc = (Math.PI * 2) / n;
+    // Pointer at -PI/2; invert drawWheel mapping
+    let raw = (-Math.PI / 2 - angleRad) / arc;
+    raw = ((raw % n) + n) % n;
+    return Math.min(n - 1, raw | 0);
+  }
 
   function sessionKey(code) {
     return `c1-session-${String(code || "").toUpperCase()}`;
@@ -199,6 +241,16 @@
     return (st?.questions || []).filter((q) => !q.used);
   }
 
+  /** Questions still in play for the wheel (skips are saved for rapid fire) */
+  function wheelQuestions(st = state) {
+    return (st?.questions || []).filter((q) => !q.used && !q.deferred);
+  }
+
+  /** Leftovers for the top-2 buzzer round */
+  function leftoverQuestions(st = state) {
+    return (st?.questions || []).filter((q) => !q.used);
+  }
+
   function getPlayer(id, st = state) {
     return (st?.players || []).find((p) => p.id === id);
   }
@@ -234,6 +286,8 @@
       currentQuestionId,
       spinToken,
       spinTargetIndex,
+      lastPickedId,
+      pickCounts,
       finals,
       winnerId,
       revealForId,
@@ -251,6 +305,8 @@
       currentQuestionId,
       spinToken,
       spinTargetIndex,
+      lastPickedId: lastPickedId || null,
+      pickCounts: pickCounts || {},
       finals,
       winnerId,
       revealForId,
@@ -288,6 +344,8 @@
       currentQuestionId: null,
       spinToken: 0,
       spinTargetIndex: 0,
+      lastPickedId: null,
+      pickCounts: {},
       finals: null,
       winnerId: null,
       revealForId: null,
@@ -786,26 +844,22 @@
         break;
       }
       case "addQuestion": {
-        if (state.phase !== "questions" && state.phase !== "finalsPrep") return;
+        if (state.phase !== "questions") return;
         const text = String(action.text || "").trim();
         if (!text) return;
         const author = getPlayer(action.playerId);
         if (!author || author.kicked) return;
-        const pot = action.pot === "finals" || state.phase === "finalsPrep" ? "finals" : "wheel";
         const entry = {
           id: uid(),
           text,
           authorId: author.id,
           authorName: author.name,
           used: false,
+          deferred: false,
+          skippedBy: [],
         };
-        if (pot === "finals") {
-          if (!state.finalsQuestions) state.finalsQuestions = [];
-          state.finalsQuestions.push(entry);
-        } else {
-          state.questions.push(entry);
-        }
-        upsertQuestionRow(entry, pot);
+        state.questions.push(entry);
+        upsertQuestionRow(entry, "wheel");
         publish();
         break;
       }
@@ -821,7 +875,8 @@
         const q = state.questions.find((x) => x.id === state.currentQuestionId);
         if (!player || !q) return;
         player.skips += 1;
-        // Skipped questions stay in the unanswered pool for someone else
+        // Skipped questions leave the wheel and wait for rapid fire
+        q.deferred = true;
         if (!Array.isArray(q.skippedBy)) q.skippedBy = [];
         if (!q.skippedBy.includes(player.id)) q.skippedBy.push(player.id);
         if (player.skips >= MAX_SKIPS) player.kicked = true;
@@ -873,6 +928,7 @@
           const player = getPlayer(id);
           const q = state.finals.questions?.[state.finals.index];
           if (player && q) {
+            q.used = true;
             logQuestionOutcome({ question: q, player, pot: "finals", outcome: "answered" });
           }
         }
@@ -884,11 +940,6 @@
         openFinalsQuestion();
         break;
       }
-      case "beginFinalsNow": {
-        if (state.phase !== "finalsPrep") return;
-        beginFinalsMatch();
-        break;
-      }
       default:
         break;
     }
@@ -896,40 +947,55 @@
 
   function shouldGoToFinals() {
     const alive = activePlayers();
-    const left = unusedQuestions();
     if (alive.length < 2) return true;
-    if (left.length === 0) return true;
+    // Wheel empties when every leftover was skipped (saved for rapid fire) or answered
+    if (wheelQuestions().length === 0) return true;
     return false;
   }
 
   function beginWheelRound() {
-    const alive = activePlayers();
-    const left = unusedQuestions();
+    const alive = wheelPlayers();
+    const left = wheelQuestions();
 
     if (alive.length < 2 || left.length === 0) {
       startFinals();
       return;
     }
 
-    // Prefer a player + question they have not already skipped
-    const shuffledPlayers = [...alive].sort(() => Math.random() - 0.5);
-    let player = null;
-    let q = null;
-    for (const p of shuffledPlayers) {
-      const available = left.filter((quest) => !(quest.skippedBy || []).includes(p.id));
-      if (available.length) {
-        player = p;
-        q = available[(Math.random() * available.length) | 0];
+    // Avoid back-to-back picks when someone else can go
+    let pool = alive.slice();
+    if (state.lastPickedId && pool.length > 1) {
+      const withoutLast = pool.filter((p) => p.id !== state.lastPickedId);
+      if (withoutLast.length) pool = withoutLast;
+    }
+
+    // Weight toward people who have been picked less this game
+    const counts = state.pickCounts || {};
+    const weights = pool.map((p) => {
+      const c = counts[p.id] || 0;
+      return 1 / (1 + c * 1.35);
+    });
+    const total = weights.reduce((a, b) => a + b, 0);
+    let r = Math.random() * total;
+    let player = pool[pool.length - 1];
+    for (let i = 0; i < pool.length; i++) {
+      r -= weights[i];
+      if (r <= 0) {
+        player = pool[i];
         break;
       }
     }
-    // Edge case: every alive player already skipped every leftover question
-    if (!player || !q) {
-      player = shuffledPlayers[0];
-      q = left[(Math.random() * left.length) | 0];
-    }
 
-    const targetIndex = Math.max(0, alive.findIndex((p) => p.id === player.id));
+    const q = left[(Math.random() * left.length) | 0];
+
+    const targetIndex = Math.max(
+      0,
+      alive.findIndex((p) => p.id === player.id)
+    );
+
+    if (!state.pickCounts) state.pickCounts = {};
+    state.pickCounts[player.id] = (state.pickCounts[player.id] || 0) + 1;
+    state.lastPickedId = player.id;
 
     state.phase = "spinning";
     state.spinTargetIndex = targetIndex;
@@ -938,13 +1004,12 @@
     state.currentQuestionId = q.id;
     publish();
 
-    // Host flips to answering after spin duration (clients animate via spinToken)
     setTimeout(() => {
       if (!state || state.phase !== "spinning") return;
       if (state.currentPlayerId !== player.id) return;
       state.phase = "answering";
       publish();
-    }, 4200);
+    }, SPIN_MS + 180);
   }
 
   function startFinals() {
@@ -972,7 +1037,7 @@
     let a;
     let b;
     if (firstTier.length >= 2) {
-      const shuffled = [...firstTier].sort(() => Math.random() - 0.5);
+      const shuffled = shuffleInPlace([...firstTier]);
       a = shuffled[0];
       b = shuffled[1];
     } else {
@@ -982,23 +1047,10 @@
       b = secondTier[(Math.random() * secondTier.length) | 0];
     }
 
-    // Remember finalists + reveal privilege, then ensure a NEW question bank
+    // Top 2 by answers → auto rapid fire with leftover questions from the start pot
     state.revealForId = ranked[0].id;
     state._finalistAId = a.id;
     state._finalistBId = b.id;
-
-    const bank = state.finalsQuestions || [];
-    if (bank.length === 0) {
-      // Need brand-new rapid-fire questions — short prep round
-      state.phase = "finalsPrep";
-      state.questionEndsAt = Date.now() + FINALS_PREP_SECONDS * 1000;
-      state.currentPlayerId = null;
-      state.currentQuestionId = null;
-      state.finals = null;
-      publish();
-      return;
-    }
-
     beginFinalsMatch();
   }
 
@@ -1009,20 +1061,25 @@
     const b = getPlayer(bId);
     if (!a || !b) {
       state.phase = "end";
+      state.winnerId = state.revealForId || aId || bId || null;
       publish();
       return;
     }
 
-    const bank = [...(state.finalsQuestions || [])];
+    const bank = leftoverQuestions();
     if (bank.length === 0) {
-      toast("Add at least one rapid-fire question first");
-      state.phase = "finalsPrep";
-      state.questionEndsAt = Date.now() + FINALS_PREP_SECONDS * 1000;
+      // Nothing left to buzz — crown the best answerer from the wheel
+      state.winnerId = state.revealForId || a.id;
+      state.phase = "end";
+      state.currentPlayerId = null;
+      state.currentQuestionId = null;
+      state.finals = null;
       publish();
+      toast("No leftover questions — crowning the top answerer");
       return;
     }
 
-    const finalsQs = bank.sort(() => Math.random() - 0.5).slice(0, 12);
+    const finalsQs = shuffleInPlace([...bank]).slice(0, 12);
 
     state.phase = "finals";
     state.currentPlayerId = null;
@@ -1109,11 +1166,23 @@
       const start = angleRad + i * arc;
       ctx.beginPath();
       ctx.moveTo(cx, cy);
-      ctx.arc(cx, cy, radius, start, start + arc);
+      ctx.arc(cx, cy, radius, start, start + arc, false);
       ctx.closePath();
-      ctx.fillStyle = WHEEL_COLORS[i % WHEEL_COLORS.length];
-      if (highlightIndex === i) ctx.fillStyle = "#ffffff";
+      let fill = WHEEL_COLORS[i % WHEEL_COLORS.length];
+      if (highlightIndex === i) fill = "#ffffff";
+      ctx.fillStyle = fill;
       ctx.fill();
+
+      // divider
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(
+        cx + Math.cos(start) * radius,
+        cy + Math.sin(start) * radius
+      );
+      ctx.strokeStyle = "rgba(7, 16, 24, 0.35)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
 
       // label
       ctx.save();
@@ -1121,9 +1190,9 @@
       ctx.rotate(start + arc / 2);
       ctx.textAlign = "right";
       ctx.fillStyle = "#071018";
-      ctx.font = `bold ${Math.max(14, 28 - n)}px Outfit, sans-serif`;
+      ctx.font = `bold ${Math.max(13, 26 - n * 0.8)}px Outfit, sans-serif`;
       const label = (players[i]?.name || "?").slice(0, 10);
-      ctx.fillText(label, radius - 16, 6);
+      ctx.fillText(label, radius - 18, 5);
       ctx.restore();
     }
 
@@ -1139,37 +1208,47 @@
   }
 
   function animateWheelToIndex(players, targetIndex, token) {
-    if (wheelSpinning && lastSpinToken === token) return;
+    if (lastSpinToken === token) return;
+    if (wheelRaf) cancelAnimationFrame(wheelRaf);
     wheelSpinning = true;
     lastSpinToken = token;
 
-    const n = players.length;
+    const n = Math.max(players.length, 1);
     const arc = (Math.PI * 2) / n;
-    // Pointer is at top (-PI/2). Segment i center should land under pointer.
-    const targetCenter = targetIndex * arc + arc / 2;
+    // Pointer at top (-PI/2). Land slightly off-center inside the segment for realism.
+    const jitter = (spinUnit(token, 3) - 0.5) * arc * 0.55;
+    const targetCenter = targetIndex * arc + arc / 2 + jitter;
     const desired = -Math.PI / 2 - targetCenter;
-    const turns = 4 + Math.random() * 2;
-    const from = wheelAngle;
-    const to = from + turns * Math.PI * 2 + ((desired - from) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
 
-    const duration = 4000;
+    // Extra full turns — synced across clients via spinToken
+    const turns = 5 + Math.floor(spinUnit(token, 1) * 3); // 5–7
+    const from = wheelAngle;
+    let delta = desired - from;
+    delta = ((delta % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    const to = from + turns * Math.PI * 2 + delta;
+
+    const duration = SPIN_MS;
     const start = performance.now();
 
     function frame(now) {
       if (lastSpinToken !== token) return;
       const t = Math.min(1, (now - start) / duration);
-      const eased = 1 - Math.pow(1 - t, 3);
+      const eased = easeOutQuint(t);
       wheelAngle = from + (to - from) * eased;
-      drawWheel(players, wheelAngle, t > 0.92 ? targetIndex : -1);
+
+      const under = indexUnderPointer(players, wheelAngle);
+      drawWheel(players, wheelAngle, under);
+
       if (t < 1) {
-        requestAnimationFrame(frame);
+        wheelRaf = requestAnimationFrame(frame);
       } else {
-        wheelAngle = desired;
+        wheelAngle = to;
         drawWheel(players, wheelAngle, targetIndex);
         wheelSpinning = false;
+        wheelRaf = 0;
       }
     }
-    requestAnimationFrame(frame);
+    wheelRaf = requestAnimationFrame(frame);
   }
 
   // ---------- render ----------
@@ -1190,7 +1269,6 @@
         renderLobby();
         break;
       case "questions":
-      case "finalsPrep":
         showScreen("questions");
         renderQuestions();
         break;
@@ -1244,83 +1322,39 @@
     els.questionTimer.textContent = formatTime(remaining);
     els.questionTimer.classList.toggle("urgent", remaining <= 30);
     els.questionCount.textContent = String(state.questions?.length || 0);
-    if (els.finalsQuestionCount) {
-      els.finalsQuestionCount.textContent = String(state.finalsQuestions?.length || 0);
-    }
 
     const title = document.querySelector("#screen-questions .section-title");
     const sub = document.querySelector("#screen-questions .section-sub");
-    const potFieldset = document.querySelector(".pot-choice");
-    if (state.phase === "finalsPrep") {
-      if (title) title.textContent = "Rapid-fire questions";
-      if (sub) {
-        sub.textContent =
-          "Wheel is done. Add NEW questions for the top-2 buzzer round — these won’t reuse the wheel pot.";
-      }
-      if (potFieldset) {
-        potFieldset.hidden = true;
-        const finalsRadio = document.querySelector('input[name="question-pot"][value="finals"]');
-        if (finalsRadio) finalsRadio.checked = true;
-      }
-    } else {
-      if (title) title.textContent = "Drop your questions";
-      if (sub) sub.textContent = "Totally anonymous — nobody sees who wrote what (yet).";
-      if (potFieldset) potFieldset.hidden = false;
+    if (title) title.textContent = "Drop your questions";
+    if (sub) {
+      sub.textContent =
+        "Totally anonymous — nobody sees who wrote what (yet). One pot for the whole game.";
     }
 
-    // Host shortcut during finals prep
-    let hostBtn = document.getElementById("btn-begin-finals");
-    if (state.phase === "finalsPrep" && me.isHost) {
-      if (!hostBtn) {
-        hostBtn = document.createElement("button");
-        hostBtn.type = "button";
-        hostBtn.id = "btn-begin-finals";
-        hostBtn.className = "btn btn-primary";
-        hostBtn.style.marginTop = "0.75rem";
-        els.questionForm.parentElement?.appendChild(hostBtn);
-      }
-      const n = state.finalsQuestions?.length || 0;
-      hostBtn.hidden = false;
-      hostBtn.disabled = n < 1;
-      hostBtn.textContent = n < 1 ? "Need at least 1 rapid-fire question" : `Start rapid fire (${n} ready)`;
-      hostBtn.onclick = () => send({ type: "beginFinalsNow" });
-    } else if (hostBtn) {
-      hostBtn.hidden = true;
-    }
+    const hostBtn = document.getElementById("btn-begin-finals");
+    if (hostBtn) hostBtn.hidden = true;
 
     els.myQuestions.innerHTML = "";
     myLocalQuestions.forEach((item) => {
       const li = document.createElement("li");
-      const label = typeof item === "string" ? item : `${item.pot === "finals" ? "[Finale] " : "[Wheel] "}${item.text}`;
-      li.textContent = label;
+      li.textContent = typeof item === "string" ? item : item.text;
       els.myQuestions.appendChild(li);
     });
 
     questionTick = setInterval(() => {
-      if (!state || (state.phase !== "questions" && state.phase !== "finalsPrep")) return;
+      if (!state || state.phase !== "questions") return;
       const left = ((state.questionEndsAt || Date.now()) - Date.now()) / 1000;
       els.questionTimer.textContent = formatTime(left);
       els.questionTimer.classList.toggle("urgent", left <= 30);
       if (left <= 0 && me.isHost) {
         clearInterval(questionTick);
-        if (state.phase === "questions") {
-          handleAction({ type: "questionsDone" });
-        } else if (state.phase === "finalsPrep") {
-          if ((state.finalsQuestions || []).length > 0) {
-            handleAction({ type: "beginFinalsNow" });
-          } else {
-            // Give more time if still empty
-            state.questionEndsAt = Date.now() + FINALS_PREP_SECONDS * 1000;
-            publish();
-            toast("Still need rapid-fire questions — timer extended");
-          }
-        }
+        handleAction({ type: "questionsDone" });
       }
     }, 250);
   }
 
   function renderGame() {
-    const alive = activePlayers();
+    const alive = wheelPlayers();
     els.scoreStrip.innerHTML = "";
     alive.forEach((p) => {
       const chip = document.createElement("span");
@@ -1329,7 +1363,15 @@
       els.scoreStrip.appendChild(chip);
     });
 
-    drawWheel(alive, wheelAngle, state.phase === "answering" || state.phase === "confirm" ? state.spinTargetIndex : -1);
+    if (!wheelSpinning) {
+      drawWheel(
+        alive,
+        wheelAngle,
+        state.phase === "answering" || state.phase === "confirm"
+          ? state.spinTargetIndex
+          : -1
+      );
+    }
 
     if (state.phase === "spinning" && state.spinToken !== lastSpinToken) {
       els.wheelCaption.textContent = "The wheel decides…";
@@ -1507,17 +1549,13 @@
     });
 
     const canReveal = me.id === state.revealForId || me.id === state.winnerId;
-    if (canReveal && ((state.questions?.length || 0) + (state.finalsQuestions?.length || 0)) > 0) {
+    if (canReveal && (state.questions?.length || 0) > 0) {
       els.revealPanel.hidden = false;
       els.revealList.innerHTML = "";
       (state.questions || []).forEach((q) => {
         const li = document.createElement("li");
-        li.innerHTML = `<span class="q">[Wheel] ${escapeHtml(q.text)}</span><span class="by">— ${escapeHtml(q.authorName)}</span>`;
-        els.revealList.appendChild(li);
-      });
-      (state.finalsQuestions || []).forEach((q) => {
-        const li = document.createElement("li");
-        li.innerHTML = `<span class="q">[Finale] ${escapeHtml(q.text)}</span><span class="by">— ${escapeHtml(q.authorName)}</span>`;
+        const tag = q.deferred ? "Leftover" : q.used ? "Answered" : "Unused";
+        li.innerHTML = `<span class="q">[${tag}] ${escapeHtml(q.text)}</span><span class="by">— ${escapeHtml(q.authorName || "?")}</span>`;
         els.revealList.appendChild(li);
       });
     } else {
@@ -1845,19 +1883,15 @@
     e.preventDefault();
     const text = els.questionInput.value.trim();
     if (!text) return;
-    const potEl = document.querySelector('input[name="question-pot"]:checked');
-    const pot =
-      state?.phase === "finalsPrep" ? "finals" : potEl?.value === "finals" ? "finals" : "wheel";
-    myLocalQuestions.push({ text, pot });
-    send({ type: "addQuestion", playerId: me.id, text, pot });
+    myLocalQuestions.push({ text });
+    send({ type: "addQuestion", playerId: me.id, text });
     els.questionInput.value = "";
     els.questionFeedback.hidden = false;
-    els.questionFeedback.textContent =
-      pot === "finals" ? "Added to rapid-fire pot." : "Added to wheel pot.";
+    els.questionFeedback.textContent = "Added to the pot.";
     setTimeout(() => {
       els.questionFeedback.hidden = true;
     }, 1600);
-    if (state?.phase === "questions" || state?.phase === "finalsPrep") renderQuestions();
+    if (state?.phase === "questions") renderQuestions();
   });
 
   els.buzzerA.addEventListener("click", () => {

@@ -20,7 +20,7 @@
         <p class="category-badge">Category 1</p>
         <p class="brand">Anon Wheel</p>
         <h1 class="home-title">Shout it out.<br />No names attached.</h1>
-        <p class="home-sub">Add questions in secret. Spin the wheel. Face the buzzer.</p>
+        <p class="home-sub">Add questions in secret. Spin the wheel. Top two face the buzzer with what’s left.</p>
 
         <form id="home-form" class="home-form">
           <label class="field">
@@ -84,28 +84,15 @@
 
           <form id="question-form" class="question-form">
             <textarea id="question-input" rows="3" maxlength="200" placeholder="What’s something you’ve never told this group?" required></textarea>
-            <fieldset class="pot-choice">
-              <legend>Add to</legend>
-              <label class="radio-pill">
-                <input type="radio" name="question-pot" value="wheel" checked />
-                <span>Wheel round</span>
-              </label>
-              <label class="radio-pill">
-                <input type="radio" name="question-pot" value="finals" />
-                <span>Rapid-fire finale</span>
-              </label>
-            </fieldset>
             <button type="submit" class="btn btn-primary">Add question</button>
           </form>
           <p id="question-feedback" class="feedback" hidden></p>
         </div>
 
         <aside class="questions-aside">
-          <p class="stat-label">Wheel pot</p>
+          <p class="stat-label">Questions in the pot</p>
           <p class="stat-value" id="question-count">0</p>
-          <p class="stat-label" style="margin-top:1rem">Rapid-fire pot</p>
-          <p class="stat-value" id="finals-question-count">0</p>
-          <p class="hint">Wheel questions are used first. Rapid-fire needs its <em>own</em> new questions — they won’t reuse the wheel ones.</p>
+          <p class="hint">One shared pot. The wheel uses them first. Whatever’s left goes to the top-2 rapid-fire round.</p>
           <ul id="my-questions" class="my-questions"></ul>
         </aside>
       </div>
