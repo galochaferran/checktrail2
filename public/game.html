@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anon Wheel — Party Questions</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="bg-noise" aria-hidden="true"></div>
+  <div class="bg-glow" aria-hidden="true"></div>
+
+  <div id="app">
+    <!-- JOIN / CREATE -->
+    <section id="screen-home" class="screen active">
+      <div class="home-stage">
+        <p class="brand">Anon Wheel</p>
+        <h1 class="home-title">Shout it out.<br />No names attached.</h1>
+        <p class="home-sub">Add questions in secret. Spin the wheel. Face the buzzer.</p>
+
+        <form id="home-form" class="home-form">
+          <label class="field">
+            <span>Your name</span>
+            <input id="player-name" type="text" maxlength="18" placeholder="What should we call you?" autocomplete="nickname" required />
+          </label>
+
+          <div class="home-actions">
+            <button type="submit" class="btn btn-primary" id="btn-create">Create room</button>
+            <div class="join-row">
+              <input id="room-code" type="text" maxlength="6" placeholder="ROOM" class="room-input" autocomplete="off" />
+              <button type="button" class="btn btn-ghost" id="btn-join">Join</button>
+            </div>
+          </div>
+        </form>
+        <p id="home-error" class="error-msg" hidden></p>
+        <p class="hint" style="margin-top:1.25rem;max-width:42ch">
+          Each room code (e.g. <code>?room=ABC123</code>) keeps its own players — Mariam’s lobby never mixes with John’s. Players are stored in Supabase; spins and game events use Realtime Broadcast.
+        </p>
+      </div>
+    </section>
+    <!-- LOBBY -->
+    <section id="screen-lobby" class="screen">
+      <header class="topbar">
+        <p class="brand-sm">Anon Wheel</p>
+        <div class="room-chip">
+          <span>Room</span>
+          <strong id="lobby-code">————</strong>
+          <button type="button" class="btn-icon" id="btn-copy-link" title="Copy invite link">Copy link</button>
+        </div>
+      </header>
+
+      <div class="lobby-layout">
+        <div>
+          <h2 class="section-title">Players in the room</h2>
+          <p class="section-sub">Share the link. When everyone’s in, the host starts the clock.</p>
+          <ul id="player-list" class="player-list"></ul>
+        </div>
+        <aside class="lobby-aside">
+          <p class="aside-label" id="lobby-status">Waiting for players…</p>
+          <button type="button" class="btn btn-primary btn-lg" id="btn-start-questions" hidden>
+            Start 5-minute question round
+          </button>
+          <p class="hint" id="lobby-hint">Need at least 2 players to start.</p>
+        </aside>
+      </div>
+    </section>
+
+    <!-- QUESTION SUBMIT -->
+    <section id="screen-questions" class="screen">
+      <header class="topbar">
+        <p class="brand-sm">Anon Wheel</p>
+        <div class="timer-chip" id="question-timer">5:00</div>
+      </header>
+
+      <div class="questions-layout">
+        <div>
+          <h2 class="section-title">Drop your questions</h2>
+          <p class="section-sub">Totally anonymous — nobody sees who wrote what (yet).</p>
+
+          <form id="question-form" class="question-form">
+            <textarea id="question-input" rows="3" maxlength="200" placeholder="What’s something you’ve never told this group?" required></textarea>
+            <button type="submit" class="btn btn-primary">Add question</button>
+          </form>
+          <p id="question-feedback" class="feedback" hidden></p>
+        </div>
+
+        <aside class="questions-aside">
+          <p class="stat-label">Questions in the pot</p>
+          <p class="stat-value" id="question-count">0</p>
+          <p class="hint">Keep adding until the timer hits zero. The wheel takes over next.</p>
+          <ul id="my-questions" class="my-questions"></ul>
+        </aside>
+      </div>
+    </section>
+
+    <!-- MAIN GAME (wheel + answer) -->
+    <section id="screen-game" class="screen">
+      <header class="topbar">
+        <p class="brand-sm">Anon Wheel</p>
+        <div class="score-strip" id="score-strip"></div>
+      </header>
+
+      <div class="game-layout">
+        <div class="wheel-panel">
+          <div class="wheel-wrap">
+            <div class="wheel-pointer" aria-hidden="true"></div>
+            <canvas id="wheel-canvas" width="420" height="420"></canvas>
+          </div>
+          <p class="wheel-caption" id="wheel-caption">Spinning for the next victim…</p>
+        </div>
+
+        <div class="action-panel" id="action-panel">
+          <!-- filled by JS based on phase -->
+        </div>
+      </div>
+    </section>
+
+    <!-- FINALS -->
+    <section id="screen-finals" class="screen">
+      <header class="topbar">
+        <p class="brand-sm">Anon Wheel</p>
+        <p class="finals-tag">Rapid-fire finale</p>
+      </header>
+
+      <div class="finals-layout">
+        <div class="buzzer-row">
+          <button type="button" class="buzzer" id="buzzer-a" disabled>
+            <span class="buzzer-name" id="finalist-a-name">—</span>
+            <span class="buzzer-score" id="finalist-a-score">0</span>
+            <span class="buzzer-hit">BUZZ</span>
+          </button>
+          <div class="vs-block">
+            <p class="vs">VS</p>
+            <p class="finals-timer" id="finals-timer">0:45</p>
+          </div>
+          <button type="button" class="buzzer buzzer-b" id="buzzer-b" disabled>
+            <span class="buzzer-name" id="finalist-b-name">—</span>
+            <span class="buzzer-score" id="finalist-b-score">0</span>
+            <span class="buzzer-hit">BUZZ</span>
+          </button>
+        </div>
+
+        <div class="finals-question-card" id="finals-question-wrap">
+          <p class="eyebrow" id="finals-phase-label">Get ready</p>
+          <p class="finals-question" id="finals-question">Waiting for the host to start…</p>
+          <div class="finals-controls" id="finals-controls"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- REVEAL / END -->
+    <section id="screen-end" class="screen">
+      <div class="end-stage">
+        <p class="brand">Anon Wheel</p>
+        <h2 class="section-title" id="end-title">Game over</h2>
+        <p class="section-sub" id="end-sub"></p>
+
+        <div id="reveal-panel" class="reveal-panel" hidden>
+          <h3>Who wrote what</h3>
+          <ul id="reveal-list" class="reveal-list"></ul>
+        </div>
+
+        <div id="standings" class="standings"></div>
+        <button type="button" class="btn btn-primary" id="btn-play-again">Back to home</button>
+      </div>
+    </section>
+
+    <!-- KICKED OVERLAY -->
+    <div id="kicked-overlay" class="overlay" hidden>
+      <div class="overlay-card">
+        <h2>You’re out</h2>
+        <p>Three skips. The wheel moves on without you.</p>
+        <p class="hint">You can still watch — you just can’t be picked again.</p>
+      </div>
+    </div>
+
+    <!-- TOAST -->
+    <div id="toast" class="toast" hidden></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="supabase-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
