@@ -27,13 +27,17 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  min-height: 100dvh;
   background: var(--ink);
   color: var(--text);
   font-family: var(--font-body);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
   overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button,
@@ -41,12 +45,20 @@ input,
 textarea {
   font: inherit;
   color: inherit;
+  touch-action: manipulation;
 }
 
 button {
   cursor: pointer;
   border: none;
   background: none;
+}
+
+/* Prevent iOS zoom on focus */
+input[type="text"],
+textarea,
+.room-input {
+  font-size: 16px;
 }
 
 .bg-noise,
@@ -74,12 +86,18 @@ button {
   position: relative;
   z-index: 1;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .screen {
   display: none;
   min-height: 100vh;
-  padding: 1.25rem clamp(1rem, 4vw, 2.5rem) 2.5rem;
+  min-height: 100dvh;
+  padding:
+    max(1rem, env(safe-area-inset-top))
+    max(1rem, env(safe-area-inset-right))
+    max(1.5rem, env(safe-area-inset-bottom))
+    max(1rem, env(safe-area-inset-left));
   animation: fadeIn 0.35s ease;
 }
 
@@ -97,6 +115,20 @@ button {
   font-family: var(--font-display);
   letter-spacing: 0.06em;
   margin: 0;
+}
+
+.category-badge {
+  display: inline-block;
+  margin: 0 0 0.75rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid rgba(200, 245, 66, 0.35);
+  background: rgba(200, 245, 66, 0.1);
+  color: var(--lime);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 
 .brand {
@@ -185,6 +217,48 @@ textarea {
 .home-actions {
   display: grid;
   gap: 0.75rem;
+}
+
+.invite-join-block {
+  display: grid;
+  gap: 0.75rem;
+}
+
+/* Receiver invite links only — hide create / code join UI */
+#screen-home.invite-receiver-mode #btn-create,
+#screen-home.invite-receiver-mode .join-row {
+  display: none !important;
+}
+
+.invite-room-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.invite-room-label strong {
+  color: var(--lime);
+  letter-spacing: 0.14em;
+}
+
+.invite-own-group {
+  margin: 0.15rem 0 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  justify-self: start;
+}
+
+.invite-own-group:hover {
+  color: var(--text);
 }
 
 .join-row {
@@ -410,6 +484,48 @@ textarea {
   display: grid;
   gap: 0.75rem;
   max-width: 520px;
+}
+
+.pot-choice {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  margin: 0;
+  padding: 0.75rem 0.9rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.pot-choice legend {
+  padding: 0 0.35rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.radio-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.radio-pill:has(input:checked) {
+  border-color: rgba(200, 245, 66, 0.55);
+  background: rgba(200, 245, 66, 0.12);
+  color: var(--lime);
+}
+
+.radio-pill input {
+  accent-color: var(--lime);
 }
 
 .feedback {
@@ -747,7 +863,133 @@ textarea {
   display: none;
 }
 
+/* ---- Mobile-first polish ---- */
 @media (max-width: 700px) {
+  .screen {
+    padding:
+      max(0.85rem, env(safe-area-inset-top))
+      max(0.85rem, env(safe-area-inset-right))
+      max(1.25rem, env(safe-area-inset-bottom))
+      max(0.85rem, env(safe-area-inset-left));
+  }
+
+  .home-stage,
+  .end-stage {
+    padding-top: max(1.25rem, env(safe-area-inset-top));
+  }
+
+  .brand {
+    font-size: clamp(2.75rem, 16vw, 4rem);
+  }
+
+  .home-title {
+    font-size: clamp(1.85rem, 9vw, 2.6rem);
+    max-width: none;
+  }
+
+  .home-sub,
+  .section-sub {
+    font-size: 0.98rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .home-form {
+    max-width: none;
+  }
+
+  .join-row {
+    grid-template-columns: 1fr;
+  }
+
+  .join-row .btn,
+  .btn-lg,
+  .btn-primary,
+  .btn-ghost,
+  .btn-danger,
+  .btn-ok {
+    min-height: 48px;
+  }
+
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.65rem;
+    margin-bottom: 1.15rem;
+  }
+
+  .topbar .brand-sm {
+    font-size: 1.35rem;
+  }
+
+  .room-chip,
+  .timer-chip {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .timer-chip {
+    font-size: 1.55rem;
+    justify-content: center;
+  }
+
+  .lobby-layout,
+  .questions-layout,
+  .game-layout {
+    gap: 1.1rem;
+  }
+
+  .section-title {
+    font-size: clamp(1.7rem, 8vw, 2.2rem);
+  }
+
+  .lobby-aside,
+  .questions-aside,
+  .action-panel {
+    padding: 1rem;
+  }
+
+  .stat-value {
+    font-size: 3.4rem;
+  }
+
+  .wheel-wrap {
+    width: min(100%, 280px);
+  }
+
+  .action-panel {
+    min-height: 0;
+    position: sticky;
+    bottom: max(0.5rem, env(safe-area-inset-bottom));
+    z-index: 5;
+  }
+
+  .picked-name {
+    font-size: clamp(1.8rem, 9vw, 2.4rem);
+  }
+
+  .question-display {
+    font-size: 1.15rem;
+  }
+
+  .choice-row {
+    grid-template-columns: 1fr;
+  }
+
+  .choice-row .btn {
+    min-height: 52px;
+    font-size: 1.05rem;
+  }
+
+  .pot-choice {
+    flex-direction: column;
+  }
+
+  .radio-pill {
+    width: 100%;
+    justify-content: flex-start;
+    min-height: 44px;
+  }
+
   .buzzer-row {
     grid-template-columns: 1fr;
   }
@@ -756,7 +998,75 @@ textarea {
     order: -1;
   }
 
-  .choice-row {
-    grid-template-columns: 1fr;
+  .buzzer {
+    min-height: 120px;
+    border-radius: 22px;
+  }
+
+  .buzzer-score {
+    font-size: 2.3rem;
+  }
+
+  .finals-question-card {
+    padding: 1.1rem;
+  }
+
+  .finals-controls {
+    flex-direction: column;
+  }
+
+  .finals-controls .btn {
+    width: 100%;
+    min-height: 48px;
+  }
+
+  .reveal-panel {
+    padding: 1rem;
+  }
+
+  .overlay {
+    padding: 1rem;
+    align-items: end;
+  }
+
+  .overlay-card {
+    width: 100%;
+    max-width: none;
+    border-radius: 22px 22px 14px 14px;
+    padding: 1.35rem 1.15rem max(1.35rem, env(safe-area-inset-bottom));
+  }
+
+  .toast {
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: max(1rem, env(safe-area-inset-bottom));
+    transform: none;
+    text-align: center;
+    max-width: none;
+  }
+
+  /* Long setup hints eat the fold on phones */
+  .home-stage > .hint {
+    font-size: 0.82rem;
+  }
+}
+
+@media (max-width: 380px) {
+  .brand {
+    font-size: 2.4rem;
+  }
+
+  .wheel-wrap {
+    width: min(100%, 240px);
+  }
+
+  .player-pill {
+    padding: 0.7rem 0.8rem;
+  }
+}
+
+@media (min-width: 701px) {
+  .screen {
+    padding: 1.25rem clamp(1rem, 4vw, 2.5rem) 2.5rem;
   }
 }

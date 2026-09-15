@@ -8,7 +8,8 @@
 (() => {
   "use strict";
 
-  const QUESTION_SECONDS = 5 * 60;
+  const QUESTION_SECONDS = 3 * 60;
+  const FINALS_PREP_SECONDS = 2 * 60;
   const FINALS_SECONDS = 45;
   const MAX_SKIPS = 3;
 
@@ -19,7 +20,10 @@
     console.error("Supabase config missing. Check supabase-config.js and the Supabase CDN script.");
   }
 
-  const supabaseClient = window.supabase?.createClient(SUPABASE_URL, SUPABASE_KEY);
+  const supabaseClient = window.supabase?.createClient(SUPABASE_URL, SUPABASE_KEY, {
+    db: { schema: "category_one" },
+  });
+  const db = () => supabaseClient.schema("category_one");
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
@@ -50,6 +54,7 @@
     questionInput: $("#question-input"),
     questionFeedback: $("#question-feedback"),
     questionCount: $("#question-count"),
+    finalsQuestionCount: $("#finals-question-count"),
     myQuestions: $("#my-questions"),
     scoreStrip: $("#score-strip"),
     wheelCanvas: $("#wheel-canvas"),
@@ -92,6 +97,40 @@
   let myLocalQuestions = [];
   let toastTimer = null;
 
+  function sessionKey(code) {
+    return `c1-session-${String(code || "").toUpperCase()}`;
+  }
+
+  function saveSession() {
+    if (!me?.id || !state?.roomCode) return;
+    try {
+      localStorage.setItem(
+        sessionKey(state.roomCode),
+        JSON.stringify({
+          id: me.id,
+          name: me.name,
+          isHost: me.isHost,
+          roomCode: state.roomCode,
+        })
+      );
+    } catch (_) {}
+  }
+
+  function loadSession(code) {
+    try {
+      const raw = localStorage.getItem(sessionKey(code));
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function clearSession(code) {
+    try {
+      localStorage.removeItem(sessionKey(code));
+    } catch (_) {}
+  }
+
   // ---------- utils ----------
   function uid() {
     return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -128,6 +167,23 @@
     els.homeError.textContent = msg;
   }
 
+  function handleNameTaken(message) {
+    const msg =
+      message || "That name is already taken in this room. Pick another.";
+    const code = sync?.code || state?.roomCode || els.roomCode?.value?.trim();
+    try {
+      sync?.destroy?.();
+    } catch (_) {}
+    sync = null;
+    state = null;
+    if (code) clearSession(code);
+    setHomeError(msg);
+    showScreen("home");
+    if (code && typeof enableInviteHome === "function") enableInviteHome(code);
+    toast(msg);
+    if (els.btnJoin) els.btnJoin.disabled = false;
+  }
+
   function formatTime(totalSec) {
     const s = Math.max(0, Math.ceil(totalSec));
     const m = Math.floor(s / 60);
@@ -150,6 +206,7 @@
   function inviteUrl(code) {
     const url = new URL(location.href);
     url.searchParams.set("room", code);
+    url.searchParams.delete("host");
     url.searchParams.delete("local");
     return url.toString();
   }
@@ -171,6 +228,7 @@
       roomCode,
       hostId,
       questions,
+      finalsQuestions,
       questionEndsAt,
       currentPlayerId,
       currentQuestionId,
@@ -179,12 +237,15 @@
       finals,
       winnerId,
       revealForId,
+      _finalistAId,
+      _finalistBId,
     } = st;
     return {
       phase,
       roomCode,
       hostId,
       questions,
+      finalsQuestions: finalsQuestions || [],
       questionEndsAt,
       currentPlayerId,
       currentQuestionId,
@@ -193,6 +254,8 @@
       finals,
       winnerId,
       revealForId,
+      _finalistAId,
+      _finalistBId,
     };
   }
 
@@ -219,6 +282,7 @@
       hostId: hostPlayer.id,
       players: [hostPlayer],
       questions: [],
+      finalsQuestions: [],
       questionEndsAt: null,
       currentPlayerId: null,
       currentQuestionId: null,
@@ -243,8 +307,12 @@
       this._pendingGame = null;
     }
 
-    async ensureRoom(hostPlayer) {
-      const { error } = await supabaseClient.from("rooms").upsert({
+    async ensureRoom(hostPlayer, { fresh = true } = {}) {
+      if (!fresh) {
+        const existing = await this.fetchRoom();
+        if (existing) return existing;
+      }
+      const { error } = await db().from("rooms").upsert({
         code: this.code,
         host_id: hostPlayer.id,
         phase: "lobby",
@@ -252,25 +320,29 @@
         updated_at: new Date().toISOString(),
       });
       if (error) throw new Error(error.message || "Could not create room.");
+      return null;
     }
 
     /** Step 7 — add a player into this room only */
     async addPlayer(player) {
-      const { error } = await supabaseClient.from("players").insert({
-        id: player.id,
-        room_id: this.code,
-        name: player.name,
-        answered: player.answered ?? 0,
-        skips: player.skips ?? 0,
-        kicked: player.kicked ?? false,
-        is_host: player.isHost ?? false,
-      });
+      const { error } = await db().from("players").upsert(
+        {
+          id: player.id,
+          room_id: this.code,
+          name: player.name,
+          answered: player.answered ?? 0,
+          skips: player.skips ?? 0,
+          kicked: player.kicked ?? false,
+          is_host: player.isHost ?? false,
+        },
+        { onConflict: "id" }
+      );
       if (error) throw new Error(error.message || "Could not add player.");
       console.log("Player added!", player.name, "→ room", this.code);
     }
 
     async fetchPlayers() {
-      const { data, error } = await supabaseClient
+      const { data, error } = await db()
         .from("players")
         .select("*")
         .eq("room_id", this.code)
@@ -280,7 +352,7 @@
     }
 
     async fetchRoom() {
-      const { data, error } = await supabaseClient
+      const { data, error } = await db()
         .from("rooms")
         .select("*")
         .eq("code", this.code)
@@ -289,14 +361,37 @@
       return data;
     }
 
-    async start({ hostPlayer = null, joinPlayer = null } = {}) {
+    async start({ hostPlayer = null, joinPlayer = null, resume = false } = {}) {
       if (!supabaseClient) {
         throw new Error("Supabase client failed to load. Check your connection and config.");
       }
 
       if (this.isHost && hostPlayer) {
-        await this.ensureRoom(hostPlayer);
-        await this.addPlayer(hostPlayer);
+        if (resume) {
+          const room = await this.ensureRoom(hostPlayer, { fresh: false });
+          const players = await this.fetchPlayers();
+          if (!players.some((p) => p.id === hostPlayer.id)) {
+            await this.addPlayer(hostPlayer);
+          }
+          if (room) {
+            const game = room.game && typeof room.game === "object" ? room.game : {};
+            const latestPlayers = await this.fetchPlayers();
+            this.onState?.(
+              mergeGameIntoState(
+                {
+                  ...game,
+                  roomCode: this.code,
+                  hostId: room.host_id || hostPlayer.id,
+                  phase: room.phase || game.phase || "lobby",
+                },
+                latestPlayers
+              )
+            );
+          }
+        } else {
+          await this.ensureRoom(hostPlayer, { fresh: true });
+          await this.addPlayer(hostPlayer);
+        }
       } else {
         const room = await this.fetchRoom();
         if (!room) {
@@ -304,10 +399,30 @@
         }
         const players = await this.fetchPlayers();
         const game = room.game && typeof room.game === "object" ? room.game : {};
-        this.onState?.(mergeGameIntoState({ ...game, roomCode: this.code, hostId: room.host_id, phase: room.phase || game.phase || "lobby" }, players));
+        this.onState?.(
+          mergeGameIntoState(
+            {
+              ...game,
+              roomCode: this.code,
+              hostId: room.host_id,
+              phase: room.phase || game.phase || "lobby",
+            },
+            players
+          )
+        );
 
         if (joinPlayer) {
-          // Avoid duplicate if refreshing
+          const taken = players.some(
+            (p) =>
+              p.id !== joinPlayer.id &&
+              String(p.name || "").toLowerCase() ===
+                String(joinPlayer.name || "").trim().toLowerCase()
+          );
+          if (taken) {
+            throw new Error(
+              "That name is already taken in this room. Pick another."
+            );
+          }
           if (!players.some((p) => p.id === joinPlayer.id)) {
             await this.addPlayer(joinPlayer);
           }
@@ -324,7 +439,7 @@
           "postgres_changes",
           {
             event: "*",
-            schema: "public",
+            schema: "category_one",
             table: "players",
             filter: `room_id=eq.${this.code}`,
           },
@@ -342,7 +457,7 @@
           "postgres_changes",
           {
             event: "UPDATE",
-            schema: "public",
+            schema: "category_one",
             table: "rooms",
             filter: `code=eq.${this.code}`,
           },
@@ -372,6 +487,11 @@
         })
         .on("broadcast", { event: "action" }, ({ payload }) => {
           if (this.isHost && payload) this.onAction?.(payload);
+        })
+        .on("broadcast", { event: "joinRejected" }, ({ payload }) => {
+          if (payload?.playerId === me.id) {
+            handleNameTaken(payload.message);
+          }
         });
 
       await new Promise((resolve, reject) => {
@@ -417,7 +537,7 @@
             payload: snapshot,
           });
 
-          const { error } = await supabaseClient.from("rooms").upsert({
+          const { error } = await db().from("rooms").upsert({
             code: this.code,
             host_id: snapshot.hostId || st.hostId,
             phase: snapshot.phase,
@@ -440,7 +560,7 @@
     async syncPlayerStats(players) {
       await Promise.all(
         players.map((p) =>
-          supabaseClient
+          db()
             .from("players")
             .update({
               answered: p.answered,
@@ -464,6 +584,14 @@
         type: "broadcast",
         event: "action",
         payload: action,
+      });
+    }
+
+    notifyJoinRejected(payload) {
+      this.channel?.send({
+        type: "broadcast",
+        event: "joinRejected",
+        payload,
       });
     }
 
@@ -503,6 +631,9 @@
       if (msg.type === "hello" && this.isHost && state) {
         this.broadcastState(state);
       }
+      if (msg.type === "joinRejected" && msg.payload?.playerId === me.id) {
+        handleNameTaken(msg.payload.message);
+      }
     }
 
     async start() {
@@ -530,6 +661,10 @@
       this.channel.postMessage({ type: "action", sourceId: me.id, action });
     }
 
+    notifyJoinRejected(payload) {
+      this.channel.postMessage({ type: "joinRejected", sourceId: me.id, payload });
+    }
+
     destroy() {
       this.channel.close();
       window.removeEventListener("storage", this._onStorage);
@@ -537,8 +672,76 @@
   }
 
   // ---------- host action handling ----------
+  async function upsertQuestionRow(entry, pot) {
+    if (!supabaseClient || !state?.roomCode || !entry) return;
+    const { error } = await db().from("questions").upsert({
+      id: entry.id,
+      room_id: state.roomCode,
+      question_text: entry.text,
+      author_id: entry.authorId || null,
+      author_name: entry.authorName || null,
+      pot: pot === "finals" ? "finals" : "wheel",
+      status: "unanswered",
+      skip_count: 0,
+      updated_at: new Date().toISOString(),
+    });
+    if (error) console.error("Failed to upsert question:", error);
+  }
+
+  async function logQuestionOutcome({ question, player, pot, outcome }) {
+    if (!supabaseClient || !state?.roomCode || !question || !player) return;
+
+    const isSkip = outcome === "skipped";
+    const potValue = pot === "finals" ? "finals" : "wheel";
+
+    const { error: logError } = await db().from("answered_questions").insert({
+      room_id: state.roomCode,
+      question_id: question.id,
+      question_text: question.text,
+      player_id: player.id,
+      player_name: player.name,
+      author_id: question.authorId || null,
+      author_name: question.authorName || null,
+      pot: potValue,
+      outcome: isSkip ? "skipped" : "answered",
+      returned_to_pool: isSkip,
+    });
+    if (logError) console.error("Failed to log question outcome:", logError);
+
+    // Keep the live pot status in sync: skips stay unanswered; answers resolve
+    if (isSkip) {
+      const { data: existing } = await db()
+        .from("questions")
+        .select("skip_count")
+        .eq("id", question.id)
+        .maybeSingle();
+      const nextSkips = (existing?.skip_count || 0) + 1;
+      const { error } = await db()
+        .from("questions")
+        .update({
+          status: "unanswered",
+          skip_count: nextSkips,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", question.id);
+      if (error) console.error("Failed to mark question still unanswered after skip:", error);
+    } else {
+      const { error } = await db()
+        .from("questions")
+        .update({
+          status: "answered",
+          answered_by_id: player.id,
+          answered_by_name: player.name,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", question.id);
+      if (error) console.error("Failed to mark question answered:", error);
+    }
+  }
+
   function publish() {
     if (!state) return Promise.resolve();
+    saveSession();
     render();
     if (me.isHost && sync) return Promise.resolve(sync.broadcastState(state));
     return Promise.resolve();
@@ -551,13 +754,21 @@
       case "join": {
         if (state.phase !== "lobby") return;
         if (state.players.some((p) => p.id === action.player.id)) return;
-        if (state.players.some((p) => p.name.toLowerCase() === action.player.name.toLowerCase())) {
-          // allow duplicate names with suffix for simplicity
-          action.player.name = `${action.player.name}²`;
+        if (
+          state.players.some(
+            (p) => p.name.toLowerCase() === String(action.player.name || "").trim().toLowerCase()
+          )
+        ) {
+          sync?.notifyJoinRejected?.({
+            playerId: action.player.id,
+            reason: "name_taken",
+            message: "That name is already taken in this room. Pick another.",
+          });
+          return;
         }
         state.players.push({
           id: action.player.id,
-          name: action.player.name,
+          name: String(action.player.name || "").trim(),
           answered: 0,
           skips: 0,
           kicked: false,
@@ -575,18 +786,26 @@
         break;
       }
       case "addQuestion": {
-        if (state.phase !== "questions") return;
+        if (state.phase !== "questions" && state.phase !== "finalsPrep") return;
         const text = String(action.text || "").trim();
         if (!text) return;
         const author = getPlayer(action.playerId);
         if (!author || author.kicked) return;
-        state.questions.push({
+        const pot = action.pot === "finals" || state.phase === "finalsPrep" ? "finals" : "wheel";
+        const entry = {
           id: uid(),
           text,
           authorId: author.id,
           authorName: author.name,
           used: false,
-        });
+        };
+        if (pot === "finals") {
+          if (!state.finalsQuestions) state.finalsQuestions = [];
+          state.finalsQuestions.push(entry);
+        } else {
+          state.questions.push(entry);
+        }
+        upsertQuestionRow(entry, pot);
         publish();
         break;
       }
@@ -602,8 +821,11 @@
         const q = state.questions.find((x) => x.id === state.currentQuestionId);
         if (!player || !q) return;
         player.skips += 1;
-        q.used = true;
+        // Skipped questions stay in the unanswered pool for someone else
+        if (!Array.isArray(q.skippedBy)) q.skippedBy = [];
+        if (!q.skippedBy.includes(player.id)) q.skippedBy.push(player.id);
         if (player.skips >= MAX_SKIPS) player.kicked = true;
+        logQuestionOutcome({ question: q, player, pot: "wheel", outcome: "skipped" });
         state.currentPlayerId = null;
         state.currentQuestionId = null;
         if (shouldGoToFinals()) startFinals();
@@ -625,6 +847,7 @@
         if (!player || !q) return;
         player.answered += 1;
         q.used = true;
+        logQuestionOutcome({ question: q, player, pot: "wheel", outcome: "answered" });
         state.currentPlayerId = null;
         state.currentQuestionId = null;
         if (shouldGoToFinals()) startFinals();
@@ -647,6 +870,11 @@
         if (correct) {
           if (id === state.finals.aId) state.finals.aScore += 1;
           if (id === state.finals.bId) state.finals.bScore += 1;
+          const player = getPlayer(id);
+          const q = state.finals.questions?.[state.finals.index];
+          if (player && q) {
+            logQuestionOutcome({ question: q, player, pot: "finals", outcome: "answered" });
+          }
         }
         advanceFinalsQuestion();
         break;
@@ -654,6 +882,11 @@
       case "startFinalsClock": {
         if (!state.finals || state.finals.phase !== "ready") return;
         openFinalsQuestion();
+        break;
+      }
+      case "beginFinalsNow": {
+        if (state.phase !== "finalsPrep") return;
+        beginFinalsMatch();
         break;
       }
       default:
@@ -678,9 +911,25 @@
       return;
     }
 
-    const targetIndex = (Math.random() * alive.length) | 0;
-    const player = alive[targetIndex];
-    const q = left[(Math.random() * left.length) | 0];
+    // Prefer a player + question they have not already skipped
+    const shuffledPlayers = [...alive].sort(() => Math.random() - 0.5);
+    let player = null;
+    let q = null;
+    for (const p of shuffledPlayers) {
+      const available = left.filter((quest) => !(quest.skippedBy || []).includes(p.id));
+      if (available.length) {
+        player = p;
+        q = available[(Math.random() * available.length) | 0];
+        break;
+      }
+    }
+    // Edge case: every alive player already skipped every leftover question
+    if (!player || !q) {
+      player = shuffledPlayers[0];
+      q = left[(Math.random() * left.length) | 0];
+    }
+
+    const targetIndex = Math.max(0, alive.findIndex((p) => p.id === player.id));
 
     state.phase = "spinning";
     state.spinTargetIndex = targetIndex;
@@ -733,11 +982,47 @@
       b = secondTier[(Math.random() * secondTier.length) | 0];
     }
 
-    const pool = unusedQuestions().length
-      ? unusedQuestions()
-      : state.questions.map((q) => ({ ...q, used: false }));
+    // Remember finalists + reveal privilege, then ensure a NEW question bank
+    state.revealForId = ranked[0].id;
+    state._finalistAId = a.id;
+    state._finalistBId = b.id;
 
-    const finalsQs = [...pool].sort(() => Math.random() - 0.5).slice(0, 12);
+    const bank = state.finalsQuestions || [];
+    if (bank.length === 0) {
+      // Need brand-new rapid-fire questions — short prep round
+      state.phase = "finalsPrep";
+      state.questionEndsAt = Date.now() + FINALS_PREP_SECONDS * 1000;
+      state.currentPlayerId = null;
+      state.currentQuestionId = null;
+      state.finals = null;
+      publish();
+      return;
+    }
+
+    beginFinalsMatch();
+  }
+
+  function beginFinalsMatch() {
+    const aId = state._finalistAId;
+    const bId = state._finalistBId;
+    const a = getPlayer(aId);
+    const b = getPlayer(bId);
+    if (!a || !b) {
+      state.phase = "end";
+      publish();
+      return;
+    }
+
+    const bank = [...(state.finalsQuestions || [])];
+    if (bank.length === 0) {
+      toast("Add at least one rapid-fire question first");
+      state.phase = "finalsPrep";
+      state.questionEndsAt = Date.now() + FINALS_PREP_SECONDS * 1000;
+      publish();
+      return;
+    }
+
+    const finalsQs = bank.sort(() => Math.random() - 0.5).slice(0, 12);
 
     state.phase = "finals";
     state.currentPlayerId = null;
@@ -753,8 +1038,6 @@
       phase: "ready",
       endsAt: null,
     };
-    // Most-answered from main game gets author reveal privilege
-    state.revealForId = ranked[0].id;
     publish();
   }
 
@@ -907,6 +1190,7 @@
         renderLobby();
         break;
       case "questions":
+      case "finalsPrep":
         showScreen("questions");
         renderQuestions();
         break;
@@ -956,26 +1240,81 @@
   }
 
   function renderQuestions() {
-    const remaining = (state.questionEndsAt - Date.now()) / 1000;
+    const remaining = ((state.questionEndsAt || Date.now()) - Date.now()) / 1000;
     els.questionTimer.textContent = formatTime(remaining);
     els.questionTimer.classList.toggle("urgent", remaining <= 30);
-    els.questionCount.textContent = String(state.questions.length);
+    els.questionCount.textContent = String(state.questions?.length || 0);
+    if (els.finalsQuestionCount) {
+      els.finalsQuestionCount.textContent = String(state.finalsQuestions?.length || 0);
+    }
+
+    const title = document.querySelector("#screen-questions .section-title");
+    const sub = document.querySelector("#screen-questions .section-sub");
+    const potFieldset = document.querySelector(".pot-choice");
+    if (state.phase === "finalsPrep") {
+      if (title) title.textContent = "Rapid-fire questions";
+      if (sub) {
+        sub.textContent =
+          "Wheel is done. Add NEW questions for the top-2 buzzer round — these won’t reuse the wheel pot.";
+      }
+      if (potFieldset) {
+        potFieldset.hidden = true;
+        const finalsRadio = document.querySelector('input[name="question-pot"][value="finals"]');
+        if (finalsRadio) finalsRadio.checked = true;
+      }
+    } else {
+      if (title) title.textContent = "Drop your questions";
+      if (sub) sub.textContent = "Totally anonymous — nobody sees who wrote what (yet).";
+      if (potFieldset) potFieldset.hidden = false;
+    }
+
+    // Host shortcut during finals prep
+    let hostBtn = document.getElementById("btn-begin-finals");
+    if (state.phase === "finalsPrep" && me.isHost) {
+      if (!hostBtn) {
+        hostBtn = document.createElement("button");
+        hostBtn.type = "button";
+        hostBtn.id = "btn-begin-finals";
+        hostBtn.className = "btn btn-primary";
+        hostBtn.style.marginTop = "0.75rem";
+        els.questionForm.parentElement?.appendChild(hostBtn);
+      }
+      const n = state.finalsQuestions?.length || 0;
+      hostBtn.hidden = false;
+      hostBtn.disabled = n < 1;
+      hostBtn.textContent = n < 1 ? "Need at least 1 rapid-fire question" : `Start rapid fire (${n} ready)`;
+      hostBtn.onclick = () => send({ type: "beginFinalsNow" });
+    } else if (hostBtn) {
+      hostBtn.hidden = true;
+    }
 
     els.myQuestions.innerHTML = "";
-    myLocalQuestions.forEach((t) => {
+    myLocalQuestions.forEach((item) => {
       const li = document.createElement("li");
-      li.textContent = t;
+      const label = typeof item === "string" ? item : `${item.pot === "finals" ? "[Finale] " : "[Wheel] "}${item.text}`;
+      li.textContent = label;
       els.myQuestions.appendChild(li);
     });
 
     questionTick = setInterval(() => {
-      if (!state || state.phase !== "questions") return;
-      const left = (state.questionEndsAt - Date.now()) / 1000;
+      if (!state || (state.phase !== "questions" && state.phase !== "finalsPrep")) return;
+      const left = ((state.questionEndsAt || Date.now()) - Date.now()) / 1000;
       els.questionTimer.textContent = formatTime(left);
       els.questionTimer.classList.toggle("urgent", left <= 30);
       if (left <= 0 && me.isHost) {
         clearInterval(questionTick);
-        handleAction({ type: "questionsDone" });
+        if (state.phase === "questions") {
+          handleAction({ type: "questionsDone" });
+        } else if (state.phase === "finalsPrep") {
+          if ((state.finalsQuestions || []).length > 0) {
+            handleAction({ type: "beginFinalsNow" });
+          } else {
+            // Give more time if still empty
+            state.questionEndsAt = Date.now() + FINALS_PREP_SECONDS * 1000;
+            publish();
+            toast("Still need rapid-fire questions — timer extended");
+          }
+        }
       }
     }, 250);
   }
@@ -1168,12 +1507,17 @@
     });
 
     const canReveal = me.id === state.revealForId || me.id === state.winnerId;
-    if (canReveal && state.questions.length) {
+    if (canReveal && ((state.questions?.length || 0) + (state.finalsQuestions?.length || 0)) > 0) {
       els.revealPanel.hidden = false;
       els.revealList.innerHTML = "";
-      state.questions.forEach((q) => {
+      (state.questions || []).forEach((q) => {
         const li = document.createElement("li");
-        li.innerHTML = `<span class="q">${escapeHtml(q.text)}</span><span class="by">— ${escapeHtml(q.authorName)}</span>`;
+        li.innerHTML = `<span class="q">[Wheel] ${escapeHtml(q.text)}</span><span class="by">— ${escapeHtml(q.authorName)}</span>`;
+        els.revealList.appendChild(li);
+      });
+      (state.finalsQuestions || []).forEach((q) => {
+        const li = document.createElement("li");
+        li.innerHTML = `<span class="q">[Finale] ${escapeHtml(q.text)}</span><span class="by">— ${escapeHtml(q.authorName)}</span>`;
         els.revealList.appendChild(li);
       });
     } else {
@@ -1260,12 +1604,14 @@
 
     const url = new URL(location.href);
     url.searchParams.set("room", code);
+    url.searchParams.delete("host");
     if (preferLocal) url.searchParams.set("local", "1");
     else url.searchParams.delete("local");
     history.replaceState(null, "", url);
 
     await publish();
     showScreen("lobby");
+    saveSession();
     toast(
       preferLocal
         ? "Local room ready — open this link in other tabs"
@@ -1273,53 +1619,153 @@
     );
   }
 
-  async function joinRoom(name, code, preferLocal) {
+  async function joinRoom(name, code, preferLocal, opts = {}) {
     code = code.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
     if (code.length < 4) throw new Error("Enter a valid room code.");
 
-    me = { id: uid(), name, isHost: false };
+    const resumeId = opts.resumeId || null;
+    const cleanName = String(name || "").trim();
+    if (!cleanName) throw new Error("Enter a name.");
+
+    // Block duplicate names before joining (except resuming as yourself)
+    if (!resumeId) {
+      if (!preferLocal) {
+        const { data: existing, error } = await db()
+          .from("players")
+          .select("id, name")
+          .eq("room_id", code);
+        if (error) throw new Error(error.message);
+        if (
+          (existing || []).some(
+            (p) => p.name.toLowerCase() === cleanName.toLowerCase()
+          )
+        ) {
+          throw new Error(
+            "That name is already taken in this room. Pick another."
+          );
+        }
+      }
+    }
+
+    me = {
+      id: resumeId || uid(),
+      name: cleanName,
+      isHost: !!opts.resumeAsHost,
+    };
     myLocalQuestions = [];
     lastSpinToken = -1;
     state = null;
 
-    sync = preferLocal ? new LocalSync(code, false) : new SupabaseSync(code, false);
+    sync = preferLocal ? new LocalSync(code, me.isHost) : new SupabaseSync(code, me.isHost);
 
-    if (preferLocal) {
-      let joined = false;
-      sync.onState = (st) => {
-        state = st;
-        render();
-        if (!joined) {
-          joined = true;
-          send({
-            type: "join",
-            player: { id: me.id, name: me.name },
-          });
-        }
-      };
-      sync.onAction = handleAction;
-      await sync.start();
-      await new Promise((r) => setTimeout(r, 400));
-      if (!state) throw new Error("No local room found. Create one first on this device.");
-    } else {
-      attachSyncHandlers();
-      const joinPlayer = {
-        id: me.id,
-        name: me.name,
-        answered: 0,
-        skips: 0,
-        kicked: false,
-        isHost: false,
-      };
-      await sync.start({ joinPlayer });
-      if (!state) throw new Error("Room not found. Check ?room=CODE.");
+    try {
+      if (preferLocal) {
+        let joined = false;
+        sync.onState = (st) => {
+          state = st;
+          render();
+          saveSession();
+          if (!joined && !opts.resumeId) {
+            joined = true;
+            const taken = (st.players || []).some(
+              (p) =>
+                p.id !== me.id &&
+                String(p.name || "").toLowerCase() === cleanName.toLowerCase()
+            );
+            if (taken) {
+              handleNameTaken(
+                "That name is already taken in this room. Pick another."
+              );
+              return;
+            }
+            send({
+              type: "join",
+              player: { id: me.id, name: me.name },
+            });
+          }
+        };
+        sync.onAction = handleAction;
+        await sync.start();
+        await new Promise((r) => setTimeout(r, 400));
+        if (!state && sync) throw new Error("No local room found. Create one first on this device.");
+        if (!sync) return; // name was taken and cleaned up
+      } else if (me.isHost) {
+        attachSyncHandlers();
+        const hostPlayer = {
+          id: me.id,
+          name: me.name,
+          answered: 0,
+          skips: 0,
+          kicked: false,
+          isHost: true,
+        };
+        await sync.start({ hostPlayer, resume: true });
+        const players = await sync.fetchPlayers();
+        applyPlayers(players);
+      } else {
+        attachSyncHandlers();
+        const joinPlayer = {
+          id: me.id,
+          name: me.name,
+          answered: 0,
+          skips: 0,
+          kicked: false,
+          isHost: false,
+        };
+        await sync.start({ joinPlayer, resume: !!resumeId });
+        if (!state) throw new Error("Room not found. Check ?room=CODE.");
+      }
+
+      const url = new URL(location.href);
+      url.searchParams.set("room", code);
+      url.searchParams.delete("host");
+      if (preferLocal) url.searchParams.set("local", "1");
+      else url.searchParams.delete("local");
+      history.replaceState(null, "", url);
+      saveSession();
+    } catch (err) {
+      try {
+        sync?.destroy?.();
+      } catch (_) {}
+      sync = null;
+      state = null;
+      throw err;
     }
+  }
 
-    const url = new URL(location.href);
-    url.searchParams.set("room", code);
-    if (preferLocal) url.searchParams.set("local", "1");
-    else url.searchParams.delete("local");
-    history.replaceState(null, "", url);
+  async function resumeRoom(code) {
+    const session = loadSession(code);
+    if (!session?.id) return false;
+
+    const preferLocal = wantLocalMode();
+    try {
+      await joinRoom(session.name, code, preferLocal, {
+        resumeId: session.id,
+        resumeAsHost: !!session.isHost,
+      });
+      toast(`Welcome back, ${session.name}`);
+      return true;
+    } catch (err) {
+      console.error("Resume failed:", err);
+      clearSession(code);
+      return false;
+    }
+  }
+
+  let inviteMode = false;
+
+  function resetHomeToFirstLook() {
+    inviteMode = false;
+    document.getElementById("screen-home")?.classList.remove("invite-receiver-mode");
+    els.btnCreate.hidden = false;
+    els.btnCreate.style.display = "";
+    const joinRow = document.querySelector("#screen-home .join-row");
+    if (joinRow) {
+      joinRow.hidden = false;
+      joinRow.style.display = "";
+    }
+    const inviteBlock = document.getElementById("invite-join-block");
+    if (inviteBlock) inviteBlock.hidden = true;
   }
 
   // ---------- events ----------
@@ -1333,6 +1779,13 @@
     setHomeError("");
     const name = els.playerName.value.trim();
     if (!name) return;
+
+    // Invite-link receivers: Enter submits join, not create
+    if (inviteMode) {
+      els.btnJoin.click();
+      return;
+    }
+
     const preferLocal = wantLocalMode();
     els.btnCreate.disabled = true;
     try {
@@ -1392,16 +1845,19 @@
     e.preventDefault();
     const text = els.questionInput.value.trim();
     if (!text) return;
-    myLocalQuestions.push(text);
-    send({ type: "addQuestion", playerId: me.id, text });
+    const potEl = document.querySelector('input[name="question-pot"]:checked');
+    const pot =
+      state?.phase === "finalsPrep" ? "finals" : potEl?.value === "finals" ? "finals" : "wheel";
+    myLocalQuestions.push({ text, pot });
+    send({ type: "addQuestion", playerId: me.id, text, pot });
     els.questionInput.value = "";
     els.questionFeedback.hidden = false;
-    els.questionFeedback.textContent = "Added anonymously.";
+    els.questionFeedback.textContent =
+      pot === "finals" ? "Added to rapid-fire pot." : "Added to wheel pot.";
     setTimeout(() => {
       els.questionFeedback.hidden = true;
     }, 1600);
-    // refresh personal list immediately
-    if (state?.phase === "questions") renderQuestions();
+    if (state?.phase === "questions" || state?.phase === "finalsPrep") renderQuestions();
   });
 
   els.buzzerA.addEventListener("click", () => {
@@ -1422,25 +1878,73 @@
     }
   });
   els.btnPlayAgain.addEventListener("click", () => {
+    if (state?.roomCode) clearSession(state.roomCode);
     sync?.destroy?.();
     sync = null;
     state = null;
     me = { id: null, name: "", isHost: false };
     myLocalQuestions = [];
-    history.replaceState(null, "", location.pathname);
+    history.replaceState(null, "", "/");
+    resetHomeToFirstLook();
     showScreen("home");
     els.playerName.value = "";
     els.roomCode.value = "";
     setHomeError("");
   });
 
-  // Prefill room from URL
+  // Prefill / invite-only home when opening an existing room link (?room=)
+  // First-look page (no ?room=) stays unchanged.
   const params = new URLSearchParams(location.search);
   const presetRoom = params.get("room");
-  if (presetRoom) {
-    els.roomCode.value = presetRoom.toUpperCase();
+
+  function enableInviteHome(code) {
+    inviteMode = true;
+    const normalized = code.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    els.roomCode.value = normalized;
+
+    const home = document.getElementById("screen-home");
+    const actions = document.querySelector("#screen-home .home-actions");
+    if (!home || !actions) return;
+
+    home.classList.add("invite-receiver-mode");
+    els.btnCreate.hidden = true;
+    els.btnCreate.style.display = "none";
+    const joinRow = actions.querySelector(".join-row");
+    if (joinRow) {
+      joinRow.hidden = true;
+      joinRow.style.display = "none";
+    }
+
+    let inviteBlock = document.getElementById("invite-join-block");
+    if (!inviteBlock) {
+      inviteBlock = document.createElement("div");
+      inviteBlock.id = "invite-join-block";
+      inviteBlock.className = "invite-join-block";
+      inviteBlock.innerHTML = `
+        <p class="invite-room-label">Joining room <strong id="invite-room-label">${normalized}</strong></p>
+        <button type="button" class="btn btn-primary btn-lg" id="btn-invite-join">Join group</button>
+        <button type="button" class="invite-own-group" id="btn-start-own-group">start your own group</button>
+      `;
+      actions.appendChild(inviteBlock);
+      $("#btn-invite-join").onclick = () => els.btnJoin.click();
+      $("#btn-start-own-group").onclick = () => {
+        location.href = "/";
+      };
+    } else {
+      const label = $("#invite-room-label");
+      if (label) label.textContent = normalized;
+      inviteBlock.hidden = false;
+    }
   }
 
-  // Idle wheel art on home is unnecessary; draw empty wheel when game loads
-  drawWheel([{ name: "…" }, { name: "…" }, { name: "…" }, { name: "…" }], 0);
+  (async () => {
+    if (presetRoom) {
+      const resumed = await resumeRoom(presetRoom);
+      if (!resumed) enableInviteHome(presetRoom);
+    } else if (params.get("host") !== "1") {
+      location.replace("/");
+      return;
+    }
+    drawWheel([{ name: "…" }, { name: "…" }, { name: "…" }, { name: "…" }], 0);
+  })();
 })();

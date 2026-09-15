@@ -9,6 +9,7 @@ export const createClient = (cookieStore: Awaited<ReturnType<typeof cookies>>) =
     supabaseUrl!,
     supabaseKey!,
     {
+      db: { schema: "category_one" },
       cookies: {
         getAll() {
           return cookieStore.getAll();

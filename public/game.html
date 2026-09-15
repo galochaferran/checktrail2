@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Anon Wheel — Party Questions</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -17,6 +17,7 @@
     <!-- JOIN / CREATE -->
     <section id="screen-home" class="screen active">
       <div class="home-stage">
+        <p class="category-badge">Category 1</p>
         <p class="brand">Anon Wheel</p>
         <h1 class="home-title">Shout it out.<br />No names attached.</h1>
         <p class="home-sub">Add questions in secret. Spin the wheel. Face the buzzer.</p>
@@ -37,8 +38,9 @@
         </form>
         <p id="home-error" class="error-msg" hidden></p>
         <p class="hint" style="margin-top:1.25rem;max-width:42ch">
-          Each room code (e.g. <code>?room=ABC123</code>) keeps its own players — Mariam’s lobby never mixes with John’s. Players are stored in Supabase; spins and game events use Realtime Broadcast.
+          Category 1 data lives in the Supabase schema <code>category_one</code> (rooms, players, questions). Share <code>?room=ABC123</code> so everyone joins the same lobby.
         </p>
+        <p class="hint"><a href="category2.html" style="color:inherit">Category 2: Mirror Vote →</a></p>
       </div>
     </section>
     <!-- LOBBY -->
@@ -61,7 +63,7 @@
         <aside class="lobby-aside">
           <p class="aside-label" id="lobby-status">Waiting for players…</p>
           <button type="button" class="btn btn-primary btn-lg" id="btn-start-questions" hidden>
-            Start 5-minute question round
+            Start 3-minute question round
           </button>
           <p class="hint" id="lobby-hint">Need at least 2 players to start.</p>
         </aside>
@@ -72,7 +74,7 @@
     <section id="screen-questions" class="screen">
       <header class="topbar">
         <p class="brand-sm">Anon Wheel</p>
-        <div class="timer-chip" id="question-timer">5:00</div>
+        <div class="timer-chip" id="question-timer">3:00</div>
       </header>
 
       <div class="questions-layout">
@@ -82,15 +84,28 @@
 
           <form id="question-form" class="question-form">
             <textarea id="question-input" rows="3" maxlength="200" placeholder="What’s something you’ve never told this group?" required></textarea>
+            <fieldset class="pot-choice">
+              <legend>Add to</legend>
+              <label class="radio-pill">
+                <input type="radio" name="question-pot" value="wheel" checked />
+                <span>Wheel round</span>
+              </label>
+              <label class="radio-pill">
+                <input type="radio" name="question-pot" value="finals" />
+                <span>Rapid-fire finale</span>
+              </label>
+            </fieldset>
             <button type="submit" class="btn btn-primary">Add question</button>
           </form>
           <p id="question-feedback" class="feedback" hidden></p>
         </div>
 
         <aside class="questions-aside">
-          <p class="stat-label">Questions in the pot</p>
+          <p class="stat-label">Wheel pot</p>
           <p class="stat-value" id="question-count">0</p>
-          <p class="hint">Keep adding until the timer hits zero. The wheel takes over next.</p>
+          <p class="stat-label" style="margin-top:1rem">Rapid-fire pot</p>
+          <p class="stat-value" id="finals-question-count">0</p>
+          <p class="hint">Wheel questions are used first. Rapid-fire needs its <em>own</em> new questions — they won’t reuse the wheel ones.</p>
           <ul id="my-questions" class="my-questions"></ul>
         </aside>
       </div>
